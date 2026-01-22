@@ -68,7 +68,7 @@ def get_embeddings():
 
 embeddings_model = get_embeddings()
 
-llm = ChatGroq(model="qwen/qwen3-32b", temperature=0.1, max_tokens=2000)
+llm = ChatGroq(model="openai/gpt-oss-120b", temperature=0.1, max_tokens=2000)
 
 # 3. ПОДКЛЮЧЕНИЕ К QDRANT
 @st.cache_resource
