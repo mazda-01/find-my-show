@@ -2,7 +2,7 @@
 .vscode/
 *.DS_Store
 .DS_Store
-.env/
+.env
 qdrant_storage/
 data/db/
 .git/
