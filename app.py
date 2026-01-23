@@ -12,6 +12,14 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
+
+# cross encoder
+from langchain_classic.retrievers.contextual_compression import ContextualCompressionRetriever
+#from langchain_community.document_compressors import CrossEncoderReranker
+from langchain_classic.retrievers.document_compressors import CrossEncoderReranker
+from langchain_community.document_compressors import FlashrankRerank
+#from sentence_transformers import CrossEncoder
+
 from langchain_groq import ChatGroq
 import warnings
 import re
@@ -95,6 +103,20 @@ def load_vector_store():
 
 vector_store = load_vector_store()
 
+# CROSS ENCODER
+@st.cache_resource
+# def get_reranker():  # Тяжелая модель
+#     encoder_model = CrossEncoder(model_name="BAAI/bge-reranker-v2-m3")
+#     return CrossEncoderReranker(model=encoder_model, top_n=5)
+
+def get_reranker():
+    return FlashrankRerank(
+        model="ms-marco-MiniLM-L-12-v2",   # ~33–34 МБ, хороший баланс качество/скорость
+        top_n=5                            # сколько документов отдавать дальше в LLM
+    )
+
+compressor = get_reranker()
+
 # 4. ДАННЫЕ И RAG
 @st.cache_data
 def load_df():
@@ -121,7 +143,7 @@ rag_prompt = ChatPromptTemplate.from_messages([
     Твоя задача — проанализировать предоставленные сериалы и дать профессиональную оценку с долей иронии.
     
     ПРАВИЛА ОТВЕТА:
-    - Отвечай на том языке, на котором к тебе обратился пользователь (если на русском — отвечай на русском).
+    - Отвечай на том языке, на котором к тебе обратился пользователь (если на русском — отвечай на русском, если на английском - отвечай на английском).
     - Проводи глубокий анализ, но с легкой иронией над ТВ-реалиями.
     - Используй сериальные мемы и шутки там, где это уместно.
     - Подмечай забавные особенности (завышенные рейтинги, сюжетные дыры, клише).
@@ -137,7 +159,11 @@ rag_prompt = ChatPromptTemplate.from_messages([
 ])
 
 if vector_store:
-    retriever = vector_store.as_retriever(search_kwargs={"k": 5})
+    base_retriever = vector_store.as_retriever(search_kwargs={"k": 100})
+    retriever = ContextualCompressionRetriever(
+        base_compressor=compressor,
+        base_retriever=base_retriever
+    )
     rag_chain = (
         {"context": retriever | format_docs, "question": RunnablePassthrough()}
         | rag_prompt | llm | StrOutputParser()
@@ -195,26 +221,27 @@ with tab1:
                     
                     # Делаем поиск
                     try:
-                        hits = vector_store.similarity_search(search_text, k=6)
+                        hits = retriever.invoke(search_text)
                         
-                        if len(hits) <= 1:
-                            st.info("Похожих сериалов не найдено (база вернула только оригинал).")
+                        relevant_hits = []
+                        for hit in hits:
+                            m = hit.metadata
+                            if m.get('tvshow_title') == target_row['tvshow_title']:
+                                continue
+                            relevant_hits.append(hit)
+
+                        if not relevant_hits:
+                            st.info("Похожих сериалов не найдено после reranking'а.")
                         else:
-                            st.subheader("Похожие сюжеты:")
-                            cols = st.columns(5)
-                            idx = 0
-                            for hit in hits:
-                                m = hit.metadata
-                                # Сравниваем названия, чтобы не дублировать главный результат
-                                if m.get('tvshow_title') == target_row['tvshow_title']:
-                                    continue
-                                
-                                if idx < 5:
-                                    with cols[idx]:
-                                        st.image(m.get('image_url', "https://via.placeholder.com/150"), use_container_width=True)
-                                        st.markdown(f"**{m.get('tvshow_title')}**")
-                                        st.caption(f"{m.get('year')} | ⭐ {m.get('rating')}")
-                                    idx += 1
+                            st.subheader("Похожие сюжеты (после reranking):")
+                            cols = st.columns(4)
+                            # В tab1, блок показа похожих
+                        for idx, hit in enumerate(relevant_hits[:5]):
+                            m = hit.metadata
+                            with cols[idx]:
+                                st.image(m.get('image_url', "https://via.placeholder.com/150"), use_container_width=True)
+                                st.markdown(f"**{m.get('tvshow_title')}**")
+                                st.caption(f"{m.get('year')} | ⭐ {m.get('rating')}")
                     except Exception as e:
                         st.error(f"Ошибка поиска: {e}")
         else:
@@ -269,20 +296,24 @@ with tab2:
                     else: st.markdown(content)
 
         if prompt := st.chat_input("Спроси аналитика о любом сериале..."):
-            st.session_state.messages.append({"role": "user", "content": prompt})
-            with chat_container:
-                with st.chat_message("user"):
-                    st.markdown(prompt)
+            try:
+                st.session_state.messages.append({"role": "user", "content": prompt})
+                with chat_container:
+                    with st.chat_message("user"):
+                        st.markdown(prompt)
 
-                with st.chat_message("assistant"):
-                    with st.spinner("Анализирую базу данных..."):
-                        full_response = rag_chain.invoke(prompt)
-                        if "<think>" in full_response:
-                            parts = re.split(r"<think>(.*?)</think>", full_response, flags=re.DOTALL)
-                            if len(parts) > 2:
-                                with st.expander("🤔 Ход мыслей аналитика", expanded=True):
-                                    st.info(parts[1].strip())
-                                st.markdown(parts[2].strip())
+                    with st.chat_message("assistant"):
+                        with st.spinner("Анализирую базу данных..."):
+                            full_response = rag_chain.invoke(prompt)
+                            if "<think>" in full_response:
+                                parts = re.split(r"<think>(.*?)</think>", full_response, flags=re.DOTALL)
+                                if len(parts) > 2:
+                                    with st.expander("🤔 Ход мыслей аналитика", expanded=True):
+                                        st.info(parts[1].strip())
+                                    st.markdown(parts[2].strip())
+                                else: st.markdown(full_response)
                             else: st.markdown(full_response)
-                        else: st.markdown(full_response)
-            st.session_state.messages.append({"role": "assistant", "content": full_response})
+                st.session_state.messages.append({"role": "assistant", "content": full_response})
+            except Exception as e:
+                            error_msg = "This feature is currently not available in your region."
+                            st.error(error_msg)
