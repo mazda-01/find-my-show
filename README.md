@@ -29,7 +29,7 @@
 
 1. Клонируйте репозиторий:
 ```bash
-git clone https://github.com/your-username/find-my-show.git
+git clone git@github.com:mazda-01/find-my-show.git
 cd find-my-show
 ```
 
